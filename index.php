@@ -1,14 +1,22 @@
 <?php
+require "./vendor/autoload.php";
+
+$address = '127.0.0.1';
+$port = '8080';
 
 $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-socket_bind($socket, '127.0.0.1', '8080');
+socket_bind($socket, $address, $port);
 
-$cache = [];
+function GetHeader(string $cache_control): string
+{
+    return
+        "HTTP/1.1 200 OK \r\n" .
+        "Cache-Control: $cache_control \r\n" .
+        "Date:" . date('m-d-Y h:i:s a', strtotime("now")) . "\r\n" .
+        "Content-Type: text/html \r\n\r\n";
+}
 
 while (true) {
-    $date = date('m-d-Y h:i:s a', strtotime("now"));
-    $cacheExpires = date("H:i:s", strtotime("now") + 10800);
-
     socket_listen($socket);
     $client = socket_accept($socket);
 
@@ -22,43 +30,23 @@ while (true) {
 
     $file = ($file == "/" ?  "index.html" : __DIR__ . "$file.html");
 
-    if (isset($cache[$file]) && date("H:i:s", strtotime("now")) <= $cache[$file]['expires']) {
-        $Header =
-            "HTTP/1.1 200 OK \r\n" .
-            "Cache-Control: max-age=10800 \r\n" .
-            "Date: $date \r\n" .
-            "Content-Type: text/html \r\n\r\n";
+    $cacheKey = md5($file);
+    $redis = new Predis\Client();
 
-        $Content = $cache[$file]['content'];
+    if ($redis->exists($cacheKey)) {
+        $cacheContent = $redis->get($cacheKey);
+
+        $cacheOutput = GetHeader('max-age=10800') . $cacheContent;
+        socket_write($client, $cacheOutput, strlen($cacheOutput));
+        socket_close($client);
+    } else {
+        $Content = (file_get_contents($file) ? file_get_contents($file) : file_get_contents("notfound.html"));
+
         $output = $Header . $Content;
 
+        $output = GetHeader('no-cache, no-store, max-age=0') . $Content;
+        $redis->setEx($cacheKey, 10, $Content);
         socket_write($client, $output, strlen($output));
         socket_close($client);
-
-        continue;
-    } else {
-        unset($cache[$file]);
     }
-
-    $cache[$file] = [
-        'content' => file_get_contents($file),
-        'expires' => $cacheExpires,
-    ];
-
-    $Header =
-        "HTTP/1.1 200 OK \r\n" .
-        "Cache-Control: no-cache,no-store, max-age=0 \r\n" .
-        "Date: $date \r\n" .
-        "Content-Type: text/html \r\n\r\n";
-
-    $Content = file_get_contents($file);
-
-    if (!$Content) {
-        $Content = file_get_contents("notfound.html");
-    }
-
-    $output = $Header . $Content;
-
-    socket_write($client, $output, strlen($output));
-    socket_close($client);
 }
